@@ -1,0 +1,3 @@
+export const SIMULATION_DURATION_MS = 9000;
+export const SIMULATION_COOLDOWN_MS = 5000;
+export const SIMULATION_TICK = 1000;
