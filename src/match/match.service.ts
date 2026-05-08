@@ -1,29 +1,18 @@
 import { Injectable, Logger, ConflictException } from '@nestjs/common';
-import { TeamService } from '../team/team.service';
 import { generateId } from '../common/shared/utils';
 import { Match, TeamSide } from './entities/match.entity';
+import { TeamWithPlayers } from '../team/entities/team.entity';
 
 @Injectable()
 export class MatchService {
-  private match = {} as Match;
-
-  get(): Match {
-    return this.match;
-  }
-  private assertMatchLive(): void {
-    if (!this.match || this.match.status !== 'live') {
+  private assertMatchLive(match: Match): void {
+    if (!match || match.status !== 'live') {
       throw new ConflictException('Match is not live');
     }
   }
 
-  createMatch(
-    homeTeamId: string,
-    awayTeamId: string,
-    teamService: TeamService,
-  ): Match {
-    const homeTeam = teamService.findById(homeTeamId);
-    const awayTeam = teamService.findById(awayTeamId);
-    const match: Match = {
+  createMatch(homeTeam: TeamWithPlayers, awayTeam: TeamWithPlayers): Match {
+    return {
       id: generateId(`match`),
       homeTeam,
       awayTeam,
@@ -31,42 +20,40 @@ export class MatchService {
       awayScore: 0,
       status: 'scheduled',
     };
-    this.match = match;
+  }
+
+  start(match: Match): Match {
+    match.status = 'live';
+    Logger.log(`Match started: ${match.homeTeam.name} vs ${match.awayTeam.name}`);
     return match;
   }
-  start(): Match {
-    this.match.status = 'live';
+
+  stop(match: Match): Match {
+    this.assertMatchLive(match);
+    match.status = 'finished';
     Logger.log(
-      `Match started: ${this.match.homeTeam.name} vs ${this.match.awayTeam.name}`,
+      `Match finished: ${match.homeTeam.name} ${match.homeScore} : ${match.awayScore} ${match.awayTeam.name}`,
     );
-    return this.match;
-  }
-  stop(): Match {
-    this.assertMatchLive();
-    this.match.status = 'finished';
-    Logger.log(
-      `Match finished: ${this.match.homeTeam.name} ${this.match.homeScore} : ${this.match.awayScore} ${this.match.awayTeam.name}`,
-    );
-    return this.match;
+    return match;
   }
 
-  reset(): Match {
-    this.match.homeScore = 0;
-    this.match.awayScore = 0;
-    this.match.status = 'scheduled';
-    return this.match;
+  reset(match: Match): Match {
+    match.homeScore = 0;
+    match.awayScore = 0;
+    match.status = 'scheduled';
+    return match;
   }
 
-  scoreGoal(scoringSide: TeamSide): Match {
-    this.assertMatchLive();
+  scoreGoal(match: Match, scoringSide: TeamSide): Match {
+    this.assertMatchLive(match);
     if (scoringSide === TeamSide.HOME) {
-      this.match.homeScore += 1;
+      match.homeScore += 1;
     } else {
-      this.match.awayScore += 1;
+      match.awayScore += 1;
     }
     Logger.log(
-      `Goal scored: ${this.match.homeTeam.shortName} ${this.match.homeScore} : ${this.match.awayScore} ${this.match.awayTeam.shortName}`,
+      `Goal scored: ${match.homeTeam.shortName} ${match.homeScore} : ${match.awayScore} ${match.awayTeam.shortName}`,
     );
-    return this.match;
+    return match;
   }
 }

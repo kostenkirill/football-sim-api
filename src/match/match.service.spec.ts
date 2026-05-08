@@ -7,16 +7,18 @@ import { TeamSide } from './entities/match.entity';
 const mockTeamService: Partial<TeamService> = {
   findById: jest
     .fn()
-    .mockImplementation((id: string) => TEAMS.find((t) => t.id === id)),
+    .mockImplementation((id: string) =>
+      Promise.resolve(TEAMS.find((t) => t.id === id)),
+    ),
 };
 
 describe('MatchService', () => {
   let service: MatchService;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     service = new MatchService();
-    service.createMatch('team-1', 'team-2', mockTeamService as TeamService);
+    await service.createMatch('team-1', 'team-2', mockTeamService as TeamService);
   });
 
   describe('createMatch', () => {

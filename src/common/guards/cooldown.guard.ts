@@ -12,8 +12,8 @@ import { SIMULATION_COOLDOWN_MS } from '../../simulation/data/constants';
 export class CooldownGuard implements CanActivate {
   constructor(private readonly store: SimulationStore) {}
 
-  canActivate(context: ExecutionContext): boolean {
-    const lastStartedDate = this.store.getLastStartedDate();
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const lastStartedDate = await this.store.getLastStartedDate();
     if (
       lastStartedDate &&
       Date.now() - lastStartedDate.getTime() < SIMULATION_COOLDOWN_MS
