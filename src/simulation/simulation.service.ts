@@ -1,11 +1,11 @@
 import {
   Injectable,
-  Inject,
   Logger,
   ConflictException,
   BadRequestException,
 } from '@nestjs/common';
-import { MatchUp, TeamSide } from '../match/entities/match.entity';
+import { Interval } from '@nestjs/schedule';
+import { TeamSide, Match } from '../match/entities/match.entity';
 import { MatchService } from '../match/match.service';
 import { SimulationStore } from '../common/store/simulation.store';
 import { TeamService } from '../team/team.service';
@@ -13,122 +13,134 @@ import { Simulation } from './entities/simulation.entity';
 import { StartSimulationDto } from './dto/start-simulation.dto';
 import { SIMULATION_DURATION_MS, SIMULATION_TICK } from './data/constants';
 import { SimulationGateway } from './simulation.gateway';
+import { generateId } from '../common/shared/utils';
 
 @Injectable()
 export class SimulationService {
-  private matchServicesMap = new Map<string, MatchService[]>();
-  private timers = new Map<string, NodeJS.Timeout>();
   constructor(
-    @Inject('MATCHUPS') private readonly matchUps: MatchUp[],
     private readonly simulationStore: SimulationStore,
     private readonly teamService: TeamService,
     private readonly gateway: SimulationGateway,
+    private readonly matchService: MatchService,
   ) {}
-  get(id: string): Simulation {
+
+  async getAll(): Promise<Simulation[]> {
+    return this.simulationStore.findAll();
+  }
+
+  async get(id: string): Promise<Simulation> {
     return this.simulationStore.findById(id);
   }
-  start(dto: StartSimulationDto): Simulation {
-    const matchServices = this.matchUps.map((m: MatchUp) => {
-      const ms = new MatchService();
-      ms.createMatch(m.homeTeam.id, m.awayTeam.id, this.teamService);
-      return ms;
-    });
-    const simulation = this.simulationStore.create({
+
+  async start(dto: StartSimulationDto): Promise<Simulation> {
+    const teams = await this.teamService.findAll();
+    const matches: Match[] = [];
+
+    for (let index = 0; index < teams.length - 1; index += 2) {
+      const homeTeam = teams[index];
+      const awayTeam = teams[index + 1];
+      if (!homeTeam || !awayTeam) continue;
+
+      const match = this.matchService.createMatch(homeTeam, awayTeam);
+      matches.push(match);
+    }
+
+    if (!matches.length) {
+      throw new BadRequestException(
+        'Not enough teams available to create simulation matchups.',
+      );
+    }
+
+    matches.forEach((m) => this.matchService.start(m));
+
+    const simulation = await this.simulationStore.create({
+      id: generateId('sim'),
       name: dto.name,
-      matches: matchServices.map((ms) => ms.get()),
+      matches,
       status: 'running',
       startedAt: new Date(),
       finishedAt: null,
       totalGoals: 0,
     });
-    matchServices.forEach((ms) => ms.start());
-    this.matchServicesMap.set(simulation.id, matchServices);
-    this.simulationStore.setLastStartedDate(simulation.startedAt!);
-    this.scheduleGoals(simulation.id);
+
     Logger.log(`Simulation started: ${simulation.name} (ID: ${simulation.id})`);
     this.gateway.emitSimulationStart(simulation);
     return simulation;
   }
 
-  finish(id: string): Simulation {
-    const simulation = this.get(id);
+  async finish(id: string): Promise<Simulation> {
+    const simulation = await this.get(id);
     if (simulation.status !== 'running')
       throw new ConflictException('Simulation is not running');
 
-    this.clearTimer(id);
-    this.matchServicesMap.get(id)?.forEach((ms) => ms.stop());
+    const matches = simulation.matches;
+    matches.forEach((m) => this.matchService.stop(m));
+    
     simulation.status = 'completed';
     simulation.finishedAt = new Date();
     Logger.log(
       `Simulation ${simulation.name} (ID: ${simulation.id}) finished at ${simulation.finishedAt.toISOString()}`,
     );
     this.gateway.emitSimulationFinish(simulation);
+    
+    simulation.totalGoals = matches.reduce((sum, match) => sum + match.homeScore + match.awayScore, 0);
+    await this.simulationStore.saveMatches(id, matches);
     return this.simulationStore.save(simulation);
   }
 
-  restart(id: string): Simulation {
-    const simulation = this.get(id);
+  async restart(id: string): Promise<Simulation> {
+    const simulation = await this.get(id);
     if (simulation.status !== 'completed')
       throw new ConflictException(
         'Simulation is not finished yet and cannot be restarted',
       );
 
-    this.clearTimer(id);
+    const matches = simulation.matches;
 
-    const matchServices = this.matchServicesMap.get(id) ?? [];
-
-    matchServices.forEach((ms) => {
-      ms.reset();
-      ms.start();
+    matches.forEach((m) => {
+      this.matchService.reset(m);
+      this.matchService.start(m);
     });
 
-    simulation.matches = matchServices.map((ms) => ms.get());
+    simulation.matches = matches;
     simulation.status = 'running';
     simulation.startedAt = new Date();
     simulation.finishedAt = null;
     simulation.totalGoals = 0;
 
-    this.matchServicesMap.set(id, matchServices);
-    this.simulationStore.setLastStartedDate(simulation.startedAt);
-    this.simulationStore.save(simulation);
-    this.scheduleGoals(id);
+    await this.simulationStore.save(simulation);
+    await this.simulationStore.saveMatches(id, matches);
     this.gateway.emitSimulationStart(simulation);
     return simulation;
   }
 
-  private scheduleGoals(simulationId: string): void {
-    let ticks = 0;
-    const timer = setInterval(() => {
-      ticks++;
-      if (ticks > SIMULATION_DURATION_MS / SIMULATION_TICK) return;
-      const matchServices = this.matchServicesMap.get(simulationId) ?? [];
-      const allTeams = matchServices.flatMap((ms) => [
-        { team: ms.get().homeTeam, side: TeamSide.HOME, ms },
-        { team: ms.get().awayTeam, side: TeamSide.AWAY, ms },
-      ]);
-      const randomTeam = allTeams[Math.floor(Math.random() * allTeams.length)];
-      if (!randomTeam)
-        throw new BadRequestException(
-          'Could not score. No teams are available.',
-        );
-      const match = randomTeam.ms.scoreGoal(randomTeam.side);
+  @Interval(SIMULATION_TICK)
+  async handleSimulationTick(): Promise<void> {
+    try {
+      const runningSims = await this.simulationStore.findRunning();
+      for (const sim of runningSims) {
+        if (!sim.startedAt) continue;
 
-      this.gateway.emitScoreUpdate(this.get(simulationId), match);
-      this.simulationStore.update(simulationId, {
-        totalGoals: this.simulationStore.getTotalGoals(simulationId) + 1,
-      });
-      if (ticks === SIMULATION_DURATION_MS / SIMULATION_TICK) {
-        this.finish(simulationId);
+        const elapsed = new Date().getTime() - sim.startedAt.getTime();
+        if (elapsed >= SIMULATION_DURATION_MS) {
+          await this.finish(sim.id);
+          continue;
+        }
+
+        const allTeams = sim.matches.flatMap((m) => [
+          { team: m.homeTeam, side: TeamSide.HOME, match: m },
+          { team: m.awayTeam, side: TeamSide.AWAY, match: m },
+        ]);
+        const randomTeam = allTeams[Math.floor(Math.random() * allTeams.length)];
+        if (!randomTeam) continue;
+
+        const match = this.matchService.scoreGoal(randomTeam.match, randomTeam.side);
+        
+        await this.simulationStore.saveMatches(sim.id, sim.matches);
+        this.gateway.emitScoreUpdate(sim, match);
       }
-    }, SIMULATION_TICK);
-    this.timers.set(simulationId, timer);
-  }
-
-  private clearTimer(id: string): void {
-    const timer = this.timers.get(id);
-    if (timer) {
-      clearInterval(timer);
-      this.timers.delete(id);
+    } catch (error) {
+      Logger.error(`Error in simulation tick`, error);
     }
   }
 }

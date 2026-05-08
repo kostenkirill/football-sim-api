@@ -15,13 +15,18 @@ import { StartSimulationDto } from './dto/start-simulation.dto';
 export class SimulationController {
   constructor(private readonly simulationService: SimulationService) {}
 
+  @Get()
+  getAll() {
+    return this.simulationService.getAll();
+  }
+
   @Get(':id')
   get(@Param('id') id: string) {
     return this.simulationService.get(id);
   }
   @UseGuards(CooldownGuard)
   @Post('start')
-  start(@Body() dto: StartSimulationDto) {
+  async start(@Body() dto: StartSimulationDto) {
     return this.simulationService.start(dto);
   }
 
